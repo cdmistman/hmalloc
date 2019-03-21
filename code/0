@@ -1,0 +1,4 @@
+/home/colton/projects/cs3650/hw08/code/hmalloc.c:89:16: warning: Access to field 'next' results in a dereference of a null pointer (loaded from variable 'before')
+                before->next = to_split->next;
+                ~~~~~~       ^
+1 warning generated.
