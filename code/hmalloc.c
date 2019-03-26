@@ -1,276 +1,109 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-
-#include <sys/mman.h>
+#include <mmap.h>
 
 #include "hmalloc.h"
 
-#define PAGE_SZ 4096
+// ===== DEFINES ===== //
 #define TRUE 1
 #define FALSE 0
+#define PAGE_SZ 4096
+#define ARENA_32 0
+#define ARENA_64 1
+#define ARENA_128 2
+#define ARENA_256 3
+#define ARENA_512 4
+#define ARENA_1024 5
+#define NUM_ARENAS 6
 
-//--------------------------------------------------------------------------------------------------
-// TYPE DEFINITIONS
-//--------------------------------------------------------------------------------------------------
-typedef unsigned long pointer;
-typedef struct free_mem
+#define ARENA_SIZE 4
+
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS 0X20
+#endif
+
+// ===== MACROS ===== //
+#define PAGE(page_size) mmap(NULL, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+
+// ===== TYPE DEFS ===== //
+typedef unsigned long pointer_t;
+typedef unsigned long count_t;
+typedef unsigned long index_t;
+typedef struct free_block 
 {
-	size_t size;
-	struct free_mem *next;
-} free_mem;
-
-//--------------------------------------------------------------------------------------------------
-// PRIVATE VARIABLES
-//--------------------------------------------------------------------------------------------------
-static free_mem *memory;
-static hm_stats *stats;
-
-//--------------------------------------------------------------------------------------------------
-// PRIVATE FUNCTIONS
-//--------------------------------------------------------------------------------------------------
-void setup();
-free_mem *add_page(size_t, free_mem *);
-free_mem *allocate(free_mem *, free_mem *, size_t);
-void check_if_munmap();
-void check_combine();
-
-void setup()
+    struct free_block_t* next;
+} free_block_t;
+typedef struct bin_t 
 {
-	if (memory == NULL)
-	{
-		memory = add_page(PAGE_SZ, NULL);
+    size_t sz;
+    size_t mem_allocd;
+    index_t arena_index;
+    pointer_t next_seg;
+    free_block_t* free_list;
+    struct bin_t* prev;
+    struct bin_t* next;
+} bin_t;
+typedef struct arena_t
+{
+    bin_t* first;
+    pthread_mutex_t mutex;
+} arena_t;
+typedef struct arena_list_t
+{
+    arena_t arenas[ARENA_SIZE];
+} arena_list_t;
 
-		stats = hmalloc(sizeof(hm_stats));
-		stats->pages_mapped = 1;
-		stats->pages_unmapped = 0;
-		stats->chunks_allocated = 0;
-		stats->chunks_freed = 0;
-	}
+// ===== PRIVATE VARS ===== //
+static hm_stats stats;
+static arena_list_t arenas_list[NUM_ARENAS];
+for (int ii = 0; ii < NUM_ARENAS; ++ii)
+{
+    for (int jj = 0; jj < ARENA_SIZE; ++jj)
+    {
+        arenas_list[ii]->arenas[jj]->mutex = PTHREAD_MUTEX_INITIALIZER;
+        bin_t bin = mmap(0, PAGE_SZ, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        bin->sz = 2 ^ (5 + ii);
+        bin->arena_index = jj;
+        bin->free_list = NULL;
+        bin->prev = NULL;
+        bin->next = NULL;
+
+        while (bin->mem_allocd < sizeof(bin_t)) 
+            bin->mem_allocd += bin->sz;
+        bin->next_seg = (pointer_t*)bin + mem_allocd;
+    }
 }
 
-free_mem *add_page(size_t size, free_mem *prev)
+// ===== PRIVATE FUN DECS ===== //
+
+// ===== PUBLIC FUN IMPS ===== //
+void*
+hmalloc(size_t size)
 {
-	while (size % PAGE_SZ != 0)
-		++size;
+    if (size <= 0) return NULL;
 
-	free_mem *res = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (prev != NULL)
-	{
-		pointer prev_ptr = (pointer)prev;
-		pointer res_ptr = (pointer)res;
-		if (prev_ptr + prev->size == res_ptr)
-		{
-			prev->size += res->size;
-		}
-		else
-		{
-			prev->next = res;
-			res->size = size;
-			res->next = NULL;
-		}
-	}
+    index_t arenas_index;
+    if (size <= 32) arenas_index = ARENA_32;
+    else if (size <= 64) arenas_index = ARENA_64;
+    else if (size <= 128) arenas_index = ARENA_128;
+    else if (size <= 256) arenas_index = ARENA_256;
+    else if (size <= 512) arenas_index = ARENA_512;
+    else if (size <= 1024) arenas_index = ARENA_1024;
+    else arenas_index = -1;
 
-	if (stats != NULL)
-		stats->pages_mapped += size / PAGE_SZ;
-
-	return res;
-}
-
-free_mem *allocate(free_mem *before, free_mem *to_split, size_t tot_sz)
-{
-	if (tot_sz + sizeof(free_mem) > to_split->size)
-	{
-		if (before != NULL)
-			before->next = to_split->next;
-		return to_split;
-	}
-
-	pointer ptr = (pointer)to_split;
-	ptr += to_split->size;
-	ptr -= tot_sz;
-	((free_mem *)ptr)->size = tot_sz;
-	to_split->size -= tot_sz;
-
-	return (free_mem *)ptr;
-}
-
-void check_if_munmap()
-{
-	size_t sz_acc = 0;
-	free_mem *prev = NULL;
-	free_mem *curr = memory;
-
-	while (TRUE)
-	{
-		if (curr == NULL)
-			break;
-
-		sz_acc += curr->size;
-
-		if (sz_acc > PAGE_SZ && prev != NULL && curr->size % PAGE_SZ == 0 && (pointer)curr % PAGE_SZ == 0)
-		{
-			free_mem *tmp = curr;
-			prev->next = curr->next;
-			curr = curr->next;
-			munmap(tmp, tmp->size);
-			if (stats != NULL)
-				++(stats->pages_unmapped);
-			continue;
-		}
-
-		prev = curr;
-		curr = curr->next;
-	}
-}
-
-void check_combine()
-{
-	free_mem *left = memory;
-	free_mem *pre_r;
-	free_mem *right;
-
-	while (TRUE)
-	{
-		if (left == NULL)
-			break;
-
-		pre_r = left;
-		right = left->next;
-		while (TRUE)
-		{
-			if (right == NULL)
-				break;
-
-			pointer l_after = (pointer)left + left->size;
-			pointer r_strt = (pointer)right;
-
-			if (l_after == r_strt)
-			{
-				pre_r->next = right->next;
-				left->size += right->size;
-				right = right->next;
-				continue;
-			}
-
-			pre_r = right;
-			right = right->next;
-		}
-
-		left = left->next;
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-// PUBLIC FUNCTIONS
-//--------------------------------------------------------------------------------------------------
-void *hmalloc(size_t size)
-{
-	if (size <= 0)
-		return NULL;
-
-	setup();
-
-	size_t tot_sz = size + sizeof(size_t);
-	while (tot_sz % 8 != 0)
-		++tot_sz;
-
-	free_mem *prev = NULL;
-	free_mem *curr = memory;
-	free_mem *best_prev = NULL;
-	free_mem *best = NULL;
-
-	while (TRUE)
-	{
-		if (curr == NULL)
-		{
-			if (best == NULL)
-			{
-				best_prev = prev;
-				best = add_page(tot_sz, prev);
-			}
-			break;
-		}
-
-		if (curr->size >= tot_sz && (best == NULL || curr->size < best->size))
-		{
-			best_prev = prev;
-			best = curr;
-		}
-
-		prev = curr;
-		curr = curr->next;
-	}
-
-	if (stats != NULL)
-		++(stats->chunks_allocated);
-
-	return (void *)allocate(best_prev, best, tot_sz);
-}
-
-void hfree(void *to_free)
-{
-	if (to_free == NULL)
-		return;
-
-	pointer ptr = (pointer)to_free;
-	ptr -= sizeof(size_t);
-
-	free_mem *fred = (free_mem *)ptr;
-	fred->next = NULL;
-
-	free_mem *curr = memory;
-	free_mem *prev = NULL;
-	while (TRUE)
-	{
-		if (curr == NULL)
-		{
-			if (prev != NULL)
-				prev->next = fred;
-			break;
-		}
-		if (((pointer)curr + curr->size) == ptr)
-		{
-			curr->size += fred->size;
-			break;
-		}
-
-		prev = curr;
-		curr = curr->next;
-	}
-
-	if (stats != NULL)
-		++(stats->chunks_freed);
-
-	check_combine();
-	check_if_munmap();
-}
-
-void hprintstats()
-{
-	if (stats == NULL)
-	{
-		printf("No stats found\n");
-		return;
-	}
-
-	stats->free_length = 0;
-
-	free_mem *curr = memory;
-	while (TRUE)
-	{
-		if (curr == NULL)
-		{
-			break;
-		}
-		stats->free_length += curr->size;
-		curr = curr->next;
-	}
-
-	fprintf(stderr, "\n== husky malloc stats ==\n");
-	fprintf(stderr, "Mapped:   %ld\n", stats->pages_mapped);
-	fprintf(stderr, "Unmapped: %ld\n", stats->pages_unmapped);
-	fprintf(stderr, "Allocs:   %ld\n", stats->chunks_allocated);
-	fprintf(stderr, "Frees:    %ld\n", stats->chunks_freed);
-	fprintf(stderr, "Freelen:  %ld\n", stats->free_length);
+    bin_t* bin;
+    arena_t* arena;
+    if (arenas_index >= 0)
+    {
+        index_t arena_index = 0;
+        while (pthread_mutex_trylock(arenas_list[arenas_index]->arenas[arena_index]) != 0)
+        {
+            ++arena_index;
+            if (arena_index >= NUM_ARENAS) arena_index = 0;
+        }
+        arena = &(arenas_list[arenas_index]->arenas[arena_index]);
+        bin = arena->first;
+    } 
+    else 
+    {
+        bin = mmap(0, PAGE_SZ, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    }
 }

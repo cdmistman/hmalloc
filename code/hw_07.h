@@ -1,7 +1,7 @@
-#ifndef HMALLOC_H
-#define HMALLOC_H
+#ifndef HW07MALLOC_H
+#define HW07MALLOC_H
 
-#include <stddef.h>
+#include <stdlib.h>
 
 typedef struct hm_stats
 {
@@ -12,9 +12,9 @@ typedef struct hm_stats
 	long free_length;
 } hm_stats;
 
-void* hmalloc(size_t);
-void hfree(void*);
-void* hrealloc(void*, size_t);
+void *hmalloc(size_t);
+void hfree(void *);
+void *hrealloc(void *, size_t);
 void hprintstats();
 
 #endif
